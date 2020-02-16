@@ -32,13 +32,14 @@ class Particle:
         self.t = 0.0
 
 class Material:
-    def __init__(self, n, m, Z, BE=0.0):
+    def __init__(self, n, m, Z, ES, BE=0.0):
         self.n = n
         self.m = m
         self.Z = Z
         self.Z_eff = np.mean(Z)
         self.mfp = n**(-1./3.)
         self.BE = BE
+        self.ES = ES
 
 def phi(xi):
     return 0.191*np.exp(-0.279*xi) + 0.474*np.exp(-0.637*xi) + 0.335*np.exp(-1.919*xi)
@@ -64,7 +65,13 @@ def binary_collision(particle_1, particle_2, impact_parameter):
 
     #distance of closest approach
     doca_function = lambda xi: b**2/xi + phi(xi)/reduced_energy - xi
-    xic = newton(doca_function, x0=0.1)
+    if reduced_energy == 0:
+        breakpoint()
+    try:
+        xic = newton(doca_function, x0=0.1, tol=1e-3, maxiter=100)
+    except RuntimeError:
+        breakpoint()
+
     distance_of_closest_approach = xic*a
 
     #MAGIC algorithm
@@ -78,15 +85,16 @@ def binary_collision(particle_1, particle_2, impact_parameter):
     t = impact_parameter*np.tan(theta/2.)
     psi = np.arctan2(np.sin(theta), (Ma/Mb) + np.cos(theta))
     T = 4.*(Ma*Mb)/(Ma + Mb)**2*E0*(np.sin(theta/2.))**2
-
     return theta, psi, T, t
 
 def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t):
     #update position of moving particle
+
     pos_old = particle_1.pos
     particle_1.pos[:] = particle_1.pos + (material.mfp - t + particle_1.t)*particle_1.dir_cos
     free_flight_path = (material.mfp - t + particle_1.t)
     particle_1.t = t
+    #breakpoint()
 
     #update angular coordinates of incident particle
     ca, cb, cg = particle_1.dir_cos
@@ -118,8 +126,31 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
     stopping_factor = material.n*Sel*angstrom**2*e
     Enl = free_flight_path*stopping_factor
-    particle_1.E = E - T - Enl
-    particle_2.E = T - material.BE
+
+    #No electronic stopping out of material
+    if particle_1.pos[0] < 0.0:
+        Enl = 0.0
+
+    #Energy mathematics - make sure stopping doesn't reduce energy below zero
+    if E - T - Enl > 0:
+        particle_1.E = E - T - Enl
+    else:
+        particle_1.E = 0
+
+    if T - material.BE > 0:
+        particle_2.E = T - material.BE
+    else:
+        particle_2.E = 0
+
+    #Did particle leave material? Check surface binding energy and reflect
+    if particle_1.pos[0] < -material.mfp and pos_old[0] > -material.mfp:
+        print('Huh')
+        if particle_1.E * particle_1*particle_1.dir_cos[0] > material.ES:
+            particle_1.dir_cos[0] *= -1
+            print('Reflected!')
+        else:
+            particle_1.E - material.ES
+            print('Sputtered!')
 
 def pick_collision_partner(particle_1, material):
     mfp = material.n**(-1./3.)
@@ -139,21 +170,57 @@ def pick_collision_partner(particle_1, material):
     return impact_parameter, phi_azimuthal, Particle(material.m, material.Z, 0.0, [ca, cb, cg], [x_recoil, y_recoil, z_recoil])
 
 def main():
-    E0 = 1e5*e
-    EC = 1*e
-    material = Material(8.491e28, 64.*amu, 29) #Copper
-    particle_1 = Particle(64.*amu, 29, E0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    np.random.seed(5)
+    E0 = 1e4*e
+    EC = 3*e
+    N = 100
+    material = Material(8.491e28, 64.*amu, 29, 3.49*e) #Copper
+    energy_barrier_position = -material.mfp
+    alpha = 0.001
+    particle_1 = Particle(64.*amu, 29, E0, [np.cos(alpha), np.sin(alpha), 0.0], [energy_barrier_position, 0.0, 0.0])
 
-    particles = [particle_1]
+    particles = [Particle(64.*amu, 29, E0, [np.cos(alpha), np.sin(alpha), 0.0], [energy_barrier_position, 0.0, 0.0]) for _ in range(N)]
 
-    while particle_1.E > EC:
-        impact_parameter, phi_azimuthal, particle_2 = pick_collision_partner(particle_1, material)
-        theta, psi, T, t = binary_collision(particle_1, particle_2, impact_parameter)
-        update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t)
-        if T > material.BE:
-            particles.append(particle_2)
+    x, y, z, E = [energy_barrier_position], [0.0], [0.0], [E0]
+    particle_index = 0
 
-    print(particle_1.pos[0])
+    while particle_index < len(particles):
+
+
+        while particles[particle_index].E > EC and particles[particle_index].pos[0] >= energy_barrier_position:
+
+            impact_parameter, phi_azimuthal, particle_2 = pick_collision_partner(particles[particle_index], material)
+
+            if particle_2.pos[0] > 0.0:
+                theta, psi, T, t = binary_collision(particles[particle_index], particle_2, impact_parameter)
+                if particle_index == 0:
+                    print(theta*180/np.pi, psi, T, t)
+            else:
+                theta, psi, T, t = 0.0, 0.0, 0.0, 0.0
+
+            update_coordinates(particles[particle_index], particle_2, material, phi_azimuthal, theta, psi, T, t)
+            if particle_index < N:
+                print(particles[particle_index].E/e)
+                E.append(particles[particle_index].E)
+                x.append(particles[particle_index].pos[0])
+                y.append(particles[particle_index].pos[1])
+                z.append(particles[particle_index].pos[2])
+
+            if T > material.BE:
+                particles.append(particle_2)
+        particle_index += 1
+
+    x = np.array(x)
+    y = np.array(y)
+    z = np.array(z)
+    E = np.array(E)
+
+    plt.figure(1)
+    plt.scatter(x/angstrom, z/angstrom)
+
+    plt.figure(2)
+    plt.plot(E/e)
+    plt.show()
 
 
 if __name__ == '__main__':
