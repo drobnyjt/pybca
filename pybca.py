@@ -24,6 +24,7 @@ class Particle:
         self.E = E
         self.dir_cos = np.array(dir_cos)
         self.pos = np.array(pos)
+        self.pos_old = np.array(pos)
         self.t = 0.0
         self.incident = incident
         self.stopped = False
@@ -92,9 +93,9 @@ class Material:
         self.geometry = Polygon((
             (0.0, -thickness*angstrom),
             (0.0, thickness*angstrom),
-            (0.5*depth*angstrom, thickness*angstrom),
-            (0.5*depth*angstrom, 2.*thickness*angstrom),
-            (0.75*depth*angstrom, 2.*thickness*angstrom),
+            (0.25*depth*angstrom, thickness*angstrom),
+            (0.5*depth*angstrom, 4.*thickness*angstrom),
+            (0.6*depth*angstrom, 4.*thickness*angstrom),
             (0.75*depth*angstrom, thickness*angstrom),
             (depth*angstrom, thickness*angstrom),
             (depth*angstrom, -thickness*angstrom)))
@@ -187,6 +188,7 @@ def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-
 def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t):
     #update position of moving particle
     mfp = material.mfp(particle_1.pos)
+    particle_1.pos_old[:] = particle_1.pos
 
     #TRIDYN style "atomically rough surface"
     #Scatters first mfp step to avoid spatial correlation
@@ -274,7 +276,7 @@ def surface_boundary_condition(particle_1, material, model='planar'):
     elif model == 'isotropic':
         leaving_energy = particle_1.E
 
-    if not material.inside_energy_barrier(particle_1.pos) and particle_1.cosx < 0.0:
+    if (not material.inside_energy_barrier(particle_1.pos)) and (material.inside_energy_barrier(particle_1.pos_old)):
         if leaving_energy < material.Es:
             point = Point(particle_1.x, particle_1.y)
             nearest, _ = nearest_points(material.energy_barrier_geometry, point)
@@ -292,32 +294,31 @@ def surface_boundary_condition(particle_1, material, model='planar'):
 
             return False
         else:
-            #Surface refraction - bent towards surface by energy barrier
-            #See Eckstein Eq. 6.2.4
-            if model == 'planar': surface_refraction(particle_1, material)
-            #particle_1.left = True
+            surface_refraction(particle_1, material, model, factor=-1)
             return True
 
-def surface_refraction(particle_1, material):
-    #See Eckstein Eq. 6.2.4
-    #Bends particles towards surface by surface binding energy
-    Es = material.Es
-    E0 = particle_1.E
-    cosx0 = particle_1.cosx
-    sign = np.sign(particle_1.cosx)
-    sinx0 = np.sin(np.arccos(cosx0))
+def surface_refraction(particle_1, material, model='planar', factor=1):
+    if model == 'planar':
+        #See Eckstein Eq. 6.2.4
+        #Bends particles towards surface by surface binding energy
+        Es = material.Es
+        E0 = particle_1.E
+        cosx0 = particle_1.cosx
+        sign = np.sign(particle_1.cosx)
+        sinx0 = np.sin(np.arccos(cosx0))
 
-    particle_1.cosx = np.sqrt((E0*cosx0**2 + sign*Es)/(E0 + sign*Es))
-    sinx = np.sin(np.arccos(particle_1.cosx))
-    particle_1.cosy *= sinx/sinx0
-    particle_1.cosz *= sinx/sinx0
-
-    particle_1.E += sign*material.Es
+        particle_1.cosx = np.sqrt((E0*cosx0**2 + sign*Es)/(E0 + sign*Es))
+        sinx = np.sin(np.arccos(particle_1.cosx))
+        particle_1.cosy *= sinx/sinx0
+        particle_1.cosz *= sinx/sinx0
+        particle_1.E += sign*material.Es
+    else:
+        particle_1.E += factor*material.Es
 
 def bca(E0, Ec, N, theta, material, particles):
-    #Surface refraction as first step
+    #Surface refraction as first step - don't use for isotropic potential!
     for particle in particles:
-        surface_refraction(particle, material)
+        surface_refraction(particle, material, model='isotropic')
 
     #Empty arrays for plotting
     estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
@@ -336,6 +337,7 @@ def bca(E0, Ec, N, theta, material, particles):
         #Begin trajectory loop
         while not (particle_1.stopped or particle_1.left):
             #Check particle stop conditions - reflection/sputtering or stopping
+
             if not material.inside_simulation_boundary(particle_1.pos):
                 particle_1.left = True
                 continue #Skip binary collision
@@ -355,12 +357,12 @@ def bca(E0, Ec, N, theta, material, particles):
             surface_boundary_condition(particle_1, material, model='isotropic')
 
             #Store incident particle trajectories
-            if particle_index < N and trajectory_index < estimated_num_recoils:
+            if particle_index < 2*N and trajectory_index < estimated_num_recoils:
                 trajectories[:, trajectory_index] = particle_1.pos
                 trajectory_index += 1
 
             #Add recoil to particle array
-            if T > Ec:
+            if T > 1:
                 particles.append(particle_2)
 
         particle_index += 1
@@ -369,7 +371,7 @@ def bca(E0, Ec, N, theta, material, particles):
     plt.figure(1)
     plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='gray', s=1)
     #plt.scatter(material.energy_barrier_position/angstrom, 0., color='red', marker='+')
-    plt.scatter(x_final/angstrom, y_final/angstrom, color='blue', marker='x')
+    plt.scatter(x_final[x_final != 0]/angstrom, y_final[y_final != 0]/angstrom, color='blue', marker='x')
     x, y = material.geometry.exterior.xy
     x = np.array(x)
     y = np.array(y)
@@ -380,7 +382,6 @@ def bca(E0, Ec, N, theta, material, particles):
     plt.plot(x/angstrom, y/angstrom, '--', color='black')
     plt.axis('square')
     plt.axis('tight')
-
 
     #plt.figure(2)
     #plt.hist(x_final[x_final != 0.0]/angstrom, bins=20)
@@ -402,10 +403,10 @@ def bca(E0, Ec, N, theta, material, particles):
 def main():
     np.random.seed(1)
 
-    angle = 0.0001
+    angle = 30.0
     num_sims = 100
     energies = np.logspace(4, 4, num_sims)
-    N = 100
+    N = 10
 
     S = np.zeros(num_sims)
     for index, energy in enumerate(energies):
