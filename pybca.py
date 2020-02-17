@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from shapely.geometry import Point, Polygon, box
+from shapely.ops import nearest_points
 
 #constants
 e = 1.602e-19
@@ -77,17 +79,41 @@ class Particle:
         self.dir_cos[2] = cosz_new
 
 class Material:
-    def __init__(self, n, m, Z, Es, Eb=0.0):
+    def __init__(self, n, m, Z, Es, Eb=0.0, thickness=200, depth=2000):
         self.n = n
         self.m = m
         self.Z = Z
         self.Eb = Eb
         self.Es = Es
         self.energy_barrier_position = -2.*self.n**(-1./3.)/np.sqrt(2.*np.pi)
+        self.energy_barrier_thickness = 2.*self.n**(-1./3.)/np.sqrt(2.*np.pi)
         self.surface_position = 0.
 
+        self.geometry = Polygon((
+            (0.0, -thickness*angstrom),
+            (0.0, thickness*angstrom),
+            (0.5*depth*angstrom, thickness*angstrom),
+            (0.5*depth*angstrom, 2.*thickness*angstrom),
+            (0.75*depth*angstrom, 2.*thickness*angstrom),
+            (0.75*depth*angstrom, thickness*angstrom),
+            (depth*angstrom, thickness*angstrom),
+            (depth*angstrom, -thickness*angstrom)))
+
+        self.energy_barrier_geometry = self.geometry.buffer(self.energy_barrier_thickness)
+
+        self.simulation_boundary = box(*self.energy_barrier_geometry.bounds)
+
     def inside(self, pos):
-        return pos[0] > self.surface_position
+        point = Point(pos[0], pos[1])
+        return point.within(self.geometry)
+
+    def inside_energy_barrier(self, pos):
+        point = Point(pos[0], pos[1])
+        return point.within(self.energy_barrier_geometry)
+
+    def inside_simulation_boundary(self, pos):
+        point = Point(pos[0], pos[1])
+        return point.within(self.simulation_boundary)
 
     def mfp(self, pos):
         return self.n**(-1./3.)
@@ -248,16 +274,28 @@ def surface_boundary_condition(particle_1, material, model='planar'):
     elif model == 'isotropic':
         leaving_energy = particle_1.E
 
-    if particle_1.x < material.energy_barrier_position and particle_1.cosx < 0.0:
+    if not material.inside_energy_barrier(particle_1.pos) and particle_1.cosx < 0.0:
         if leaving_energy < material.Es:
+            point = Point(particle_1.x, particle_1.y)
+            nearest, _ = nearest_points(material.energy_barrier_geometry, point)
+            dx = nearest.x - point.x
+            dy = nearest.y - point.y
+
             particle_1.cosx *= -1 #Reflect back onto surface if not enough energy to leave
-            particle_1.x = material.energy_barrier_position #Push particle back to boundary
+            particle_1.cosy *= -1 #This is a 180deg rotation - not correct!
+
+            particle_1.cosx = 2.*(particle_1.cosx*dx + particle_1.cosy*dy)/(dx**2 + dy**2)*dx - particle_1.cosx
+            particle_1.cosy = 2.*(particle_1.cosx*dx + particle_1.cosy*dy)/(dx**2 + dy**2)*dy - particle_1.cosy
+
+            particle_1.x = nearest.x
+            particle_1.y = nearest.y
+
             return False
         else:
             #Surface refraction - bent towards surface by energy barrier
             #See Eckstein Eq. 6.2.4
             if model == 'planar': surface_refraction(particle_1, material)
-            particle_1.left = True
+            #particle_1.left = True
             return True
 
 def surface_refraction(particle_1, material):
@@ -298,7 +336,7 @@ def bca(E0, Ec, N, theta, material, particles):
         #Begin trajectory loop
         while not (particle_1.stopped or particle_1.left):
             #Check particle stop conditions - reflection/sputtering or stopping
-            if particle_1.x < material.energy_barrier_position and particle_1.cosx < 0.:
+            if not material.inside_simulation_boundary(particle_1.pos):
                 particle_1.left = True
                 continue #Skip binary collision
 
@@ -314,7 +352,7 @@ def bca(E0, Ec, N, theta, material, particles):
             impact_parameter, phi_azimuthal, particle_2 = pick_collision_partner(particle_1, material)
             theta, psi, T, t, doca = binary_collision(particle_1, particle_2, material, impact_parameter)
             update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t)
-            surface_boundary_condition(particle_1, material)
+            surface_boundary_condition(particle_1, material, model='isotropic')
 
             #Store incident particle trajectories
             if particle_index < N and trajectory_index < estimated_num_recoils:
@@ -327,12 +365,22 @@ def bca(E0, Ec, N, theta, material, particles):
 
         particle_index += 1
 
-    #print(len(particles))
-    #plt.figure(1)
-    #plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='black', s=1)
+    print(len(particles))
+    plt.figure(1)
+    plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='gray', s=1)
     #plt.scatter(material.energy_barrier_position/angstrom, 0., color='red', marker='+')
-    #plt.scatter(x_final/angstrom, y_final/angstrom, color='blue', marker='x')
-    #plt.axis('square')
+    plt.scatter(x_final/angstrom, y_final/angstrom, color='blue', marker='x')
+    x, y = material.geometry.exterior.xy
+    x = np.array(x)
+    y = np.array(y)
+    plt.plot(x/angstrom, y/angstrom, color='black', linewidth=3)
+    x, y = material.simulation_boundary.exterior.xy
+    x = np.array(x)
+    y = np.array(y)
+    plt.plot(x/angstrom, y/angstrom, '--', color='black')
+    plt.axis('square')
+    plt.axis('tight')
+
 
     #plt.figure(2)
     #plt.hist(x_final[x_final != 0.0]/angstrom, bins=20)
@@ -347,6 +395,8 @@ def bca(E0, Ec, N, theta, material, particles):
     S = sum([1 if particle.left and not particle.incident else 0 for particle in particles])
     print(f'reflected: {R} sputtered: {S}')
 
+    plt.show()
+    exit()
     return S
 
 def main():
@@ -354,8 +404,8 @@ def main():
 
     angle = 0.0001
     num_sims = 100
-    energies = np.logspace(2, 3, num_sims)
-    N = 1000
+    energies = np.logspace(4, 4, num_sims)
+    N = 100
 
     S = np.zeros(num_sims)
     for index, energy in enumerate(energies):
@@ -363,7 +413,7 @@ def main():
         particles = [Particle(
             1*amu, 1, energy*e,
             [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
-            [material.energy_barrier_position, 0.0, 0.0],
+            [0.9*material.energy_barrier_position, 0.0, 0.0],
             incident=True) for _ in range(N)]
 
         S[index] = bca(energy*e, 3.*e, N, angle, material, particles)
