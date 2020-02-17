@@ -111,7 +111,6 @@ def diff_doca_function(x0, beta, reduced_energy):
     return beta**2/x0**2 - dphi(x0)/reduced_energy + 1
 
 def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-6, max_iter=100):
-
     #If recoil outside surface, skip collision
     if not material.inside(particle_2.pos):
         return 0., 0., 0., 0., 0.
@@ -248,7 +247,22 @@ def surface_boundary_condition(particle_1, material):
             return True
 
 def surface_refraction(particle_1, material):
-    pass
+    Es = material.Es
+    E0 = particle_1.E
+    cosx0 = particle_1.cosx
+
+    print(cosx0)
+    sinx0 = np.sin(np.arccos(cosx0))
+
+    particle_1.cosx = np.sqrt((E0*cosx0**2 + Es)/(E0 + Es))
+    print(particle_1.cosx)
+    sinx = np.sin(np.arccos(particle_1.cosx))
+
+    particle_1.cosy *= sinx/sinx0
+    particle_1.cosz *= sinx/sinx0
+
+    particle_1.E += material.Es
+    breakpoint()
 
 def bca(E0, Ec, N, theta):
     np.random.seed(1)
@@ -256,6 +270,9 @@ def bca(E0, Ec, N, theta):
     #Define material and particles
     material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
     particles = [Particle(63.54*amu, 29, E0, [np.cos(theta*np.pi/180.), np.sin(theta*np.pi/180.), 0.0], [material.energy_barrier_position, 0.0, 0.0], incident=True) for _ in range(N)]
+
+    #for particle in particles:
+        #surface_refraction(particle, material)
 
     #Empty arrays for plotting
     estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
@@ -320,15 +337,13 @@ def bca(E0, Ec, N, theta):
 
 def main():
     #energies = np.logspace(1, 4, 10)
-    angles = np.linspace(1, 89, 10)
-    N = 10000
+    angle = 90
+    N = 1000
     energy = 40
 
-    S = []
-    for angle in angles:
-        S.append(bca(energy*e, 3.*e, N, angle)/N)
+    bca(energy*e, 3.*e, N, angle)
 
-    plt.plot(angles, S)
+    plt.show()
 
 if __name__ == '__main__':
     main()
