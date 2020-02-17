@@ -95,10 +95,15 @@ class Material:
         return self.n**(-1./3.)
 
 def phi(xi):
-    return 0.191*np.exp(-0.279*xi) + 0.474*np.exp(-0.637*xi) + 0.335*np.exp(-1.919*xi)
+    #return 0.191*np.exp(-0.279*xi) + 0.474*np.exp(-0.637*xi) + 0.335*np.exp(-1.919*xi)
+    return np.sum(phi_coef*np.exp(phi_args*xi))
 
 def dphi(xi):
-    return -0.191*0.279*np.exp(-0.279*xi) - 0.474*0.637*np.exp(-0.637*xi) - 0.335*1.919*np.exp(-1.919*xi)
+    #return -0.191*0.279*np.exp(-0.279*xi) - 0.474*0.637*np.exp(-0.637*xi) - 0.335*1.919*np.exp(-1.919*xi)
+    return np.sum(phi_args*phi_coef*np.exp(phi_args*xi))
+
+def screening_length(Za, Zb):
+    return 0.8853*a0/(np.sqrt(Za) + np.sqrt(Zb))**(2./3.)
 
 def binary_collision(particle_1, particle_2, material, impact_parameter):
 
@@ -113,19 +118,20 @@ def binary_collision(particle_1, particle_2, material, impact_parameter):
     E0 = particle_1.E
     mu = Mb/(Ma + Mb)
 
-    a = 0.8853*a0/(np.sqrt(Za) + np.sqrt(Zb))**(2./3.)
+    #Lindhard screening and reduced energy
+    a = screening_length(Za, Zb)
     reduced_energy = K*a*mu/(Za*Zb*e**2)*E0
 
+    #See M. H. Mendenhall & R. A. Weller, 1991 and 2005
     beta = impact_parameter/a
     doca_function = lambda x0: x0 - phi(x0)/reduced_energy - beta**2/x0
-
     f = lambda x: (1 - phi(x)/x/reduced_energy - (beta/x)**2)**(-1./2.)
-    x0 = newton(doca_function, x0=1, tol=1e-6, maxiter=100)
-
+    x0 = newton(doca_function, x0=1, tol=1e-3, maxiter=100)
     lambda_0 = (1./2. + (beta/x0)**2/2. - dphi(x0)/2./reduced_energy)**(-1./2.)
     alpha = 1./12.*(1. + lambda_0 + 5.*(0.4206*f(x0/0.9072) + 0.9072*f(x0/0.4206)))
     theta = np.pi*(1. - beta * alpha / x0)
 
+    #See Eckstein, Computer Simulation of Ion-Solid Interactions
     t = x0*a*np.sin(theta/2.)
     psi = np.arctan2(np.sin(theta), (Ma/Mb) + np.cos(theta))
     T = 4.*(Ma*Mb)/(Ma + Mb)**2*E0*(np.sin(theta/2.))**2
@@ -135,6 +141,7 @@ def binary_collision(particle_1, particle_2, material, impact_parameter):
 def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t):
     #update position of moving particle
     mfp = material.mfp(particle_1.x)
+
     if particle_1.first_step:
         mfp *= np.random.uniform(0., 1.) #In TRIDYN, this is the "atomically rough" surface
         particle_1.first_step = False
@@ -174,7 +181,7 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     Ma = particle_1.m
     Zb = material.Z_eff
     E = particle_1.E
-    a = 0.8853*a0/(np.sqrt(Za) + np.sqrt(Zb))**(2./3.) #Z_eff?
+    a = screening_length(Za, Zb) #Z_eff?
     Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
     stopping_factor = material.n*Sel*angstrom**2*e
     Enl = free_flight_path*stopping_factor
@@ -203,7 +210,6 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
 
 def pick_collision_partner(particle_1, material):
     mfp = material.mfp(particle_1.x)
-    #pmax = (mfp * np.pi * material.n)**(-1./2.)
     pmax = mfp/np.sqrt(np.pi)
     impact_parameter = pmax * np.sqrt(np.random.uniform(0., 1.))
     phi_azimuthal = np.random.uniform(0.0, 2.0*np.pi)
@@ -225,11 +231,11 @@ def main():
 
     E0 = 1e4*e
     Ec = 3*e
-    N = 100
-    alpha = 89
+    N = 20
+    alpha = 30
 
     material = Material(8.453e28, 63.54*amu, 29, 0.0) #Copper
-    particles = [Particle(1*amu, 1, E0, [np.cos(alpha*np.pi/180.), np.sin(alpha*np.pi/180.), 0.0], [material.energy_barrier_position, 0.0, 0.0], incident=True) for _ in range(N)]
+    particles = [Particle( 1*amu, 1, E0, [np.cos(alpha*np.pi/180.), np.sin(alpha*np.pi/180.), 0.0], [material.energy_barrier_position, 0.0, 0.0], incident=True) for _ in range(N)]
 
     trajectories = np.zeros((3, np.int(np.ceil(N*E0/Ec))))
     trajectory_index = 0
@@ -238,7 +244,7 @@ def main():
 
     particle_index = 0
     while particle_index < len(particles):
-        print(f'{np.round(particle_index / len(particles) * 100, 1)}%')
+        if particle_index%10 == 0: print(f'{np.round(particle_index / len(particles) * 100, 1)}%')
 
         particle = particles[particle_index]
         while not (particle.stopped or particle.left):
