@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import newton
+from mpl_toolkits.mplot3d import Axes3D
 
 #constants
 e = 1.602e-19
@@ -122,14 +122,13 @@ def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-
     E0 = particle_1.E
     mu = Mb/(Ma + Mb)
 
-    #Lindhard screening and reduced energy
+    #Lindhard screening length and reduced energy; nondimensionalized impact parameter
     a = screening_length(Za, Zb)
     reduced_energy = K*a*mu/(Za*Zb*e**2)*E0
-
-    #See M. H. Mendenhall & R. A. Weller, 1991 and 2005
     beta = impact_parameter/a
 
     #Guess from analytic solution to unscreened case
+    #M. H. Mendenhall & R. A. Weller, 1991
     x0 = 1./2./reduced_energy + np.sqrt((1./2./reduced_energy)**2 + beta**2)
 
     #Newton-Raphson method
@@ -143,8 +142,7 @@ def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-
     else:
         raise ValueError('Newton-Raphson exceeded {max_iter} iterations.')
 
-    #doca_function_ = lambda x0: x0 - phi(x0)/reduced_energy - beta**2/x0
-    #x01 = newton(doca_function_, x0=1, tol=1e-3, maxiter=100)
+    #See M. H. Mendenhall & R. A. Weller, 1991 and 2005 for theta calculation
     f = lambda x: (1 - phi(x)/x/reduced_energy - (beta/x)**2)**(-1./2.)
     lambda_0 = (1./2. + (beta/x0)**2/2. - dphi(x0)/2./reduced_energy)**(-1./2.)
     alpha = 1./12.*(1. + lambda_0 + 5.*(0.4206*f(x0/0.9072) + 0.9072*f(x0/0.4206)))
@@ -161,9 +159,9 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     #update position of moving particle
     mfp = material.mfp(particle_1.pos)
 
-    #if particle_1.first_step:
-    #    mfp *= np.random.uniform(1., 2.) #In TRIDYN, this is the "atomically rough" surface
-    #    particle_1.first_step = False
+    if particle_1.first_step:
+        mfp *= np.random.uniform(0., 1,)
+        particle_1.first_step = False
 
     free_flight_path = mfp - t + particle_1.t
     particle_1.pos[:] = particle_1.pos + free_flight_path*particle_1.dir_cos
@@ -262,16 +260,17 @@ def surface_refraction(particle_1, material):
     particle_1.E += sign*material.Es
 
 def bca(E0, Ec, N, theta, material, particles):
-    #for particle in particles:
-        #surface_refraction(particle, material)
+    #Surface refraction as first step
+    for particle in particles:
+        surface_refraction(particle, material)
 
     #Empty arrays for plotting
     estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
     trajectories = np.zeros((3, estimated_num_recoils))
     trajectory_index = 0
-
     x_final = np.zeros(N)
     y_final = np.zeros(N)
+    z_final = np.zeros(N)
 
     particle_index = 0
     while particle_index < len(particles):
@@ -279,7 +278,6 @@ def bca(E0, Ec, N, theta, material, particles):
 
         particle_1 = particles[particle_index]
         while not (particle_1.stopped or particle_1.left):
-
             #Check particle stop conditions - reflection/sputtering or stopping
             if particle_1.x < material.energy_barrier_position and particle_1.cosx < 0.:
                 particle_1.left = True
@@ -291,6 +289,7 @@ def bca(E0, Ec, N, theta, material, particles):
                 if particle_index < N:
                     x_final[particle_index] = particle_1.x
                     y_final[particle_index] = particle_1.y
+                    z_final[particle_index] = particle_1.z
                 continue #Skip binary collision
 
             #Binary collision step
@@ -334,7 +333,7 @@ def bca(E0, Ec, N, theta, material, particles):
 def main():
     np.random.seed(1)
 
-    angle = 60
+    angle = 0.0001
     energy = 1000
     N = 100
 
@@ -345,34 +344,8 @@ def main():
         [material.energy_barrier_position, 0.0, 0.0],
         incident=True) for _ in range(N)]
 
-    bca(energy*e, 3.*e, N, angle, material, particles)
-    plt.show()
-    exit()
+    S = bca(energy*e, 3.*e, N, angle, material, particles)
 
-    #energies = np.logspace(1, 4, 10)
-    angle = 80
-    N = 1000
-    energy = 500
-
-
-    num_angles = 5
-    angles = np.linspace(0.001, 89, num_angles)
-    S = np.zeros(num_angles)
-
-    for index, angle in enumerate(angles):
-        material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
-
-        particles = [Particle(
-            1*amu, 1, E0,
-            [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
-            [material.energy_barrier_position, 0.0, 0.0],
-            incident=True) for _ in range(N)]
-
-        S[index] = bca(energy*e, 3.*e, N, angle)
-
-    plt.figure(4)
-    plt.plot(angles, S)
-    plt.show()
 
 if __name__ == '__main__':
     main()
