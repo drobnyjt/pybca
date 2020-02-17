@@ -242,7 +242,7 @@ def surface_boundary_condition(particle_1, material):
             return False
         else:
             #Surface refraction!
-            particle_1.E - material.Es
+            surface_refraction(particle_1, material)
             particle_1.left = True
             return True
 
@@ -250,27 +250,18 @@ def surface_refraction(particle_1, material):
     Es = material.Es
     E0 = particle_1.E
     cosx0 = particle_1.cosx
-
-    print(cosx0)
+    sign = np.sign(particle_1.cosx)
     sinx0 = np.sin(np.arccos(cosx0))
 
-    particle_1.cosx = np.sqrt((E0*cosx0**2 + Es)/(E0 + Es))
-    print(particle_1.cosx)
+    particle_1.cosx = np.sqrt((E0*cosx0**2 + sign*Es)/(E0 + sign*Es))
     sinx = np.sin(np.arccos(particle_1.cosx))
 
     particle_1.cosy *= sinx/sinx0
     particle_1.cosz *= sinx/sinx0
 
-    particle_1.E += material.Es
-    breakpoint()
+    particle_1.E += sign*material.Es
 
-def bca(E0, Ec, N, theta):
-    np.random.seed(1)
-
-    #Define material and particles
-    material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
-    particles = [Particle(63.54*amu, 29, E0, [np.cos(theta*np.pi/180.), np.sin(theta*np.pi/180.), 0.0], [material.energy_barrier_position, 0.0, 0.0], incident=True) for _ in range(N)]
-
+def bca(E0, Ec, N, theta, material, particles):
     #for particle in particles:
         #surface_refraction(particle, material)
 
@@ -278,7 +269,9 @@ def bca(E0, Ec, N, theta):
     estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
     trajectories = np.zeros((3, estimated_num_recoils))
     trajectory_index = 0
+
     x_final = np.zeros(N)
+    y_final = np.zeros(N)
 
     particle_index = 0
     while particle_index < len(particles):
@@ -295,7 +288,9 @@ def bca(E0, Ec, N, theta):
             #if particle_1.x > material.surface_position and particle_1.E < Ec:
             if particle_1.E < Ec:
                 particle_1.stopped = True
-                if particle_index < N: x_final[particle_index] = particle_1.x
+                if particle_index < N:
+                    x_final[particle_index] = particle_1.x
+                    y_final[particle_index] = particle_1.y
                 continue #Skip binary collision
 
             #Binary collision step
@@ -319,10 +314,11 @@ def bca(E0, Ec, N, theta):
     plt.figure(1)
     plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='black', s=1)
     plt.scatter(material.energy_barrier_position/angstrom, 0., color='red', marker='+')
+    plt.scatter(x_final/angstrom, y_final/angstrom, color='blue', marker='x')
     plt.axis('square')
 
     plt.figure(2)
-    plt.hist(x_final/angstrom, bins=20)
+    plt.hist(x_final[x_final != 0.0]/angstrom, bins=20)
     print(f'R: {np.mean(x_final/angstrom)} sR: {np.std(x_final/angstrom)}')
 
     plt.figure(3)
@@ -336,13 +332,46 @@ def bca(E0, Ec, N, theta):
     return S
 
 def main():
+    np.random.seed(1)
+
+    angle = 60
+    energy = 1000
+    N = 100
+
+    material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
+    particles = [Particle(
+        1*amu, 1, energy*e,
+        [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
+        [material.energy_barrier_position, 0.0, 0.0],
+        incident=True) for _ in range(N)]
+
+    bca(energy*e, 3.*e, N, angle, material, particles)
+    plt.show()
+    exit()
+
     #energies = np.logspace(1, 4, 10)
-    angle = 90
+    angle = 80
     N = 1000
-    energy = 40
+    energy = 500
 
-    bca(energy*e, 3.*e, N, angle)
 
+    num_angles = 5
+    angles = np.linspace(0.001, 89, num_angles)
+    S = np.zeros(num_angles)
+
+    for index, angle in enumerate(angles):
+        material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
+
+        particles = [Particle(
+            1*amu, 1, E0,
+            [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
+            [material.energy_barrier_position, 0.0, 0.0],
+            incident=True) for _ in range(N)]
+
+        S[index] = bca(energy*e, 3.*e, N, angle)
+
+    plt.figure(4)
+    plt.plot(angles, S)
     plt.show()
 
 if __name__ == '__main__':
