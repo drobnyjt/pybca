@@ -96,11 +96,9 @@ class Material:
         return self.Z
 
 def phi(xi):
-    #return 0.191*np.exp(-0.279*xi) + 0.474*np.exp(-0.637*xi) + 0.335*np.exp(-1.919*xi)
     return np.sum(phi_coef*np.exp(phi_args*xi))
 
 def dphi(xi):
-    #return -0.191*0.279*np.exp(-0.279*xi) - 0.474*0.637*np.exp(-0.637*xi) - 0.335*1.919*np.exp(-1.919*xi)
     return np.sum(phi_args*phi_coef*np.exp(phi_args*xi))
 
 def screening_length(Za, Zb):
@@ -114,7 +112,7 @@ def diff_doca_function(x0, beta, reduced_energy):
 
 def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-6, max_iter=100):
 
-    #If recoil outside surface, skip computation
+    #If recoil outside surface, skip collision
     if not material.inside(particle_2.pos):
         return 0., 0., 0., 0., 0.
 
@@ -135,8 +133,8 @@ def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-
     #Guess from analytic solution to unscreened case
     x0 = 1./2./reduced_energy + np.sqrt((1./2./reduced_energy)**2 + beta**2)
 
-    err = 1
     #Newton-Raphson method
+    err = 1
     for _ in range(max_iter):
         xn = x0 - doca_function(x0, beta, reduced_energy)/diff_doca_function(x0, beta, reduced_energy)
         err = np.abs(xn - x0)/xn
@@ -252,13 +250,8 @@ def surface_boundary_condition(particle_1, material):
 def surface_refraction(particle_1, material):
     pass
 
-def main():
+def bca(E0, Ec, N, theta):
     np.random.seed(1)
-
-    E0 = 1e3*e
-    Ec = 3*e
-    N = 100
-    theta = 0.001 #alpha can't equal zero because of singularities in trig fxns
 
     #Define material and particles
     material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
@@ -266,8 +259,6 @@ def main():
 
     #Empty arrays for plotting
     estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
-
-    print(estimated_num_recoils)
     trajectories = np.zeros((3, estimated_num_recoils))
     trajectory_index = 0
     x_final = np.zeros(N)
@@ -297,7 +288,7 @@ def main():
             surface_boundary_condition(particle_1, material)
 
             #Store incident particle trajectories
-            if particle_index < N:
+            if particle_index < N and trajectory_index < estimated_num_recoils:
                 trajectories[:, trajectory_index] = particle_1.pos
                 trajectory_index += 1
 
@@ -324,7 +315,20 @@ def main():
     R = sum([1 if particle.left and particle.incident else 0 for particle in particles])
     S = sum([1 if particle.left and not particle.incident else 0 for particle in particles])
     print(f'reflected: {R} sputtered: {S}')
-    plt.show()
+    #plt.show()
+    return S
+
+def main():
+    #energies = np.logspace(1, 4, 10)
+    angles = np.linspace(1, 89, 10)
+    N = 10000
+    energy = 40
+
+    S = []
+    for angle in angles:
+        S.append(bca(energy*e, 3.*e, N, angle)/N)
+
+    plt.plot(angles, S)
 
 if __name__ == '__main__':
     main()
