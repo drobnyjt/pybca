@@ -234,12 +234,13 @@ def main():
     N = 20
     alpha = 30
 
+    #Define material and particles
     material = Material(8.453e28, 63.54*amu, 29, 0.0) #Copper
     particles = [Particle( 1*amu, 1, E0, [np.cos(alpha*np.pi/180.), np.sin(alpha*np.pi/180.), 0.0], [material.energy_barrier_position, 0.0, 0.0], incident=True) for _ in range(N)]
 
+    #Empty arrays for plotting
     trajectories = np.zeros((3, np.int(np.ceil(N*E0/Ec))))
     trajectory_index = 0
-
     x_final = np.zeros(N)
 
     particle_index = 0
@@ -249,26 +250,26 @@ def main():
         particle = particles[particle_index]
         while not (particle.stopped or particle.left):
 
+            #Binary collision step
             impact_parameter, phi_azimuthal, particle_2 = pick_collision_partner(particle, material)
             theta, psi, T, t, doca = binary_collision(particle, particle_2, material, impact_parameter)
             update_coordinates(particle, particle_2, material, phi_azimuthal, theta, psi, T, t)
 
+            #Check particle stop conditions - reflection/sputtering or stopping
             if particle.x < material.energy_barrier_position and particle.cosx < 0.:
                 particle.left = True
-
             if particle.x > material.surface_position and particle.E < Ec:
                 particle.stopped = True
+                x_final[particle_index] = particle.x
 
             #Store incident particle trajectories
             if particle_index < N:
                 trajectories[:, trajectory_index] = particle.pos
                 trajectory_index += 1
 
+            #Add recoil to particle array
             if T > Ec:
                 particles.append(particle_2)
-
-        if particle_index < N and particle.x > 0.0:
-            x_final[particle_index] = particle.x
 
         particle_index += 1
 
