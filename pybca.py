@@ -275,7 +275,7 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     n = material.number_density(particle_1.pos)*Zb #[electrons/m3]
     Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
 
-    if E > 25E3:
+    if E > 25E3*e:
         stopping_factor = 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I) #[Joules/meter]
     else:
         stopping_factor = material.number_density(particle_1.pos)*Sel*angstrom**2*e
