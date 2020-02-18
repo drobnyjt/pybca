@@ -11,13 +11,14 @@ angstrom = 1e-10
 eps0 = 8.85e-12
 a0 = 0.52918e-10
 K = 4.*np.pi*eps0
+me = 9.11e-31
 
 #screening
 phi_coef = np.array([0.191, 0.474, 0.335])
 phi_args = np.array([-0.279, -0.637, -1.919])
 
 class Particle:
-    def __init__(self, m, Z, E, dir_cos, pos, incident=False):
+    def __init__(self, m, Z, E, dir_cos, pos, incident=False, track_trajectories=False):
         self.m = m
         self.Z = Z
 
@@ -30,6 +31,11 @@ class Particle:
         self.stopped = False
         self.left = False
         self.first_step = self.incident
+        self.trajectory = [[self.x, self.y, self.z]]
+        self.track_trajectories = track_trajectories
+
+    def add_trajectory(self):
+        if self.track_trajectories: self.trajectory.append([self.x, self.y, self.z])
 
     @property
     def x(self):
@@ -80,7 +86,7 @@ class Particle:
         self.dir_cos[2] = cosz_new
 
 class Material:
-    def __init__(self, n, m, Z, Es, Eb=0.0, thickness=200, depth=2000):
+    def __init__(self, n, m, Z, Es, Eb=0.0, thickness=1*1e-6, depth=10*1e-6):
         self.n = n
         self.m = m
         self.Z = Z
@@ -94,11 +100,22 @@ class Material:
             (0.0, -thickness*angstrom),
             (0.0, thickness*angstrom),
             (0.25*depth*angstrom, thickness*angstrom),
-            (0.5*depth*angstrom, 4.*thickness*angstrom),
-            (0.6*depth*angstrom, 4.*thickness*angstrom),
+            (0.25*depth*angstrom, 4.*thickness*angstrom),
+            (0.0, 4.*thickness*angstrom),
+            (0.0, 6.*thickness*angstrom),
+            (depth*angstrom, 6.*thickness*angstrom),
+            (depth*angstrom, 4.*thickness*angstrom),
+            (0.75*depth*angstrom, 4.*thickness*angstrom),
             (0.75*depth*angstrom, thickness*angstrom),
             (depth*angstrom, thickness*angstrom),
             (depth*angstrom, -thickness*angstrom)))
+
+        self.geometry = Polygon((
+            (0.0, -thickness),
+            (0.0, thickness),
+            (depth, thickness),
+            (depth, -thickness)
+        ))
 
         self.energy_barrier_geometry = self.geometry.buffer(self.energy_barrier_thickness)
 
@@ -139,6 +156,24 @@ def doca_function(x0, beta, reduced_energy):
 
 def diff_doca_function(x0, beta, reduced_energy):
     return beta**2/x0**2 - dphi(x0)/reduced_energy + 1
+
+def bethe_stopping(particle_1, material):
+    E = particle_1.E
+    Za = particle_1.Z
+    Zb = material.Z_eff(particle_1.pos)
+    v = np.sqrt(2.0*E/Ma) #[m/s]
+    I = 10.0*e*Zb #[J]
+    n = material.number_density(particle_1.pos)*Zb #[electrons/m3]
+    stopping_factor = 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I) #[Joules/meter]
+    return stopping_factor
+
+def lindhard_scharff_stopping(particle_1, material):
+    E = particle_1.E
+    Za = particle_1.Z
+    Zb = material.Z_eff(particle_1.pos)
+    Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
+    stopping_factor = material.number_density(particle_1.pos)*Sel*angstrom**2*e
+    return stopping_factor
 
 def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-6, max_iter=100):
     #If recoil outside surface, skip collision
@@ -230,13 +265,26 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     #update energy coordinates
     Za = particle_1.Z
     Ma = particle_1.m
+    Mb = material.m
     Zb = material.Z_eff(particle_1.pos)
     E = particle_1.E
     a = screening_length(Za, Zb) #Z_eff?
     #TRIDYN version of Lindhard-Scharff electronic stopping
+    v = np.sqrt(2.0*E/Ma) #[m/s]
+    I = 7*e*Zb #[J]
+    n = material.number_density(particle_1.pos)*Zb #[electrons/m3]
     Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
-    stopping_factor = material.number_density(particle_1.pos)*Sel*angstrom**2*e
+
+    if E > 25E3:
+        stopping_factor = 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I) #[Joules/meter]
+    else:
+        stopping_factor = material.number_density(particle_1.pos)*Sel*angstrom**2*e
+
+    #print(E/e, 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I)/(8960)/e/1e6*10, material.number_density(particle_1.pos)*Sel*angstrom**2*e/(8960)/e/1e6*10)
+
     Enl = free_flight_path*stopping_factor
+    print(stopping_factor/8960/e/1e6*10)
+    breakpoint()
 
     #No electronic stopping out of material
     if not material.inside(particle_1.pos): Enl = 0.
@@ -315,23 +363,19 @@ def surface_refraction(particle_1, material, model='planar', factor=1):
     else:
         particle_1.E += factor*material.Es
 
-def bca(E0, Ec, N, theta, material, particles):
+def bca(E0, Ec, N, theta, material, particles, num_print=100):
     #Surface refraction as first step - don't use for isotropic potential!
     for particle in particles:
         surface_refraction(particle, material, model='isotropic')
 
     #Empty arrays for plotting
     estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
-    trajectories = np.zeros((3, estimated_num_recoils))
-    trajectory_index = 0
-    x_final = np.zeros(N)
-    y_final = np.zeros(N)
-    z_final = np.zeros(N)
 
     #Begin particle loop
     particle_index = 0
     while particle_index < len(particles):
-        if particle_index%(len(particles)/5) == 0: print(f'{np.round(particle_index / len(particles) * 100, 1)}%')
+        print(particle_index)
+        if particle_index%(len(particles)/num_print) == 0: print(f'{np.round(particle_index / len(particles) * 100, 1)}%')
 
         particle_1 = particles[particle_index]
         #Begin trajectory loop
@@ -344,10 +388,6 @@ def bca(E0, Ec, N, theta, material, particles):
 
             if particle_1.E < Ec:
                 particle_1.stopped = True
-                if particle_index < N:
-                    x_final[particle_index] = particle_1.x
-                    y_final[particle_index] = particle_1.y
-                    z_final[particle_index] = particle_1.z
                 continue #Skip binary collision
 
             #Binary collision step
@@ -357,9 +397,7 @@ def bca(E0, Ec, N, theta, material, particles):
             surface_boundary_condition(particle_1, material, model='isotropic')
 
             #Store incident particle trajectories
-            if particle_index < 2*N and trajectory_index < estimated_num_recoils:
-                trajectories[:, trajectory_index] = particle_1.pos
-                trajectory_index += 1
+            particle_1.add_trajectory()
 
             #Add recoil to particle array
             if T > 1:
@@ -367,26 +405,26 @@ def bca(E0, Ec, N, theta, material, particles):
 
         particle_index += 1
 
-    print(len(particles))
-    plt.figure(1)
-    plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='gray', s=1)
+    #print(len(particles))
+    #plt.figure(1)
+    #plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='black', s=1)
     #plt.scatter(material.energy_barrier_position/angstrom, 0., color='red', marker='+')
-    plt.scatter(x_final[x_final != 0]/angstrom, y_final[y_final != 0]/angstrom, color='blue', marker='x')
-    x, y = material.geometry.exterior.xy
-    x = np.array(x)
-    y = np.array(y)
-    plt.plot(x/angstrom, y/angstrom, color='black', linewidth=3)
-    x, y = material.simulation_boundary.exterior.xy
-    x = np.array(x)
-    y = np.array(y)
-    plt.plot(x/angstrom, y/angstrom, '--', color='black')
-    plt.axis('square')
-    plt.axis('tight')
+    #plt.scatter(x_final[x_final != 0]/angstrom, y_final[y_final != 0]/angstrom, color='red', marker='x')
+    #x, y = material.geometry.exterior.xy
+    #x = np.array(x)
+    #y = np.array(y)
+    #plt.plot(x/angstrom, y/angstrom, color='dimgray', linewidth=3)
+    #x, y = material.simulation_boundary.exterior.xy
+    #x = np.array(x)
+    #y = np.array(y)
+    #plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
+    #plt.axis('square')
+    #plt.axis('tight')
 
     #plt.figure(2)
     #plt.hist(x_final[x_final != 0.0]/angstrom, bins=20)
     print(f'E: {E0/e}')
-    print(f'R: {np.mean(x_final/angstrom)} sR: {np.std(x_final/angstrom)}')
+    #print(f'R: {np.mean(x_final/angstrom)} sR: {np.std(x_final/angstrom)}')
 
     #plt.figure(3)
     #sputtered_cosx = [particle.cosx for particle in particles if (particle.left and not particle.incident)]
@@ -396,31 +434,50 @@ def bca(E0, Ec, N, theta, material, particles):
     S = sum([1 if particle.left and not particle.incident else 0 for particle in particles])
     print(f'reflected: {R} sputtered: {S}')
 
-    plt.show()
-    exit()
-    return S
+    return particles, material
 
 def main():
     np.random.seed(1)
 
-    angle = 30.0
-    num_sims = 100
-    energies = np.logspace(4, 4, num_sims)
-    N = 10
+    angle = 0.0001
+    energy = 1e6
 
-    S = np.zeros(num_sims)
-    for index, energy in enumerate(energies):
-        material = Material(8.453e28, 63.54*amu, 29, 3.52*e) #Copper
-        particles = [Particle(
-            1*amu, 1, energy*e,
-            [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
-            [0.9*material.energy_barrier_position, 0.0, 0.0],
-            incident=True) for _ in range(N)]
+    N = 100
 
-        S[index] = bca(energy*e, 3.*e, N, angle, material, particles)
+    colors = {
+        29: 'black',
+        2: 'red',
+        74: 'blue',
+        1: 'red'
+    }
 
-    plt.loglog(energies, S/N)
+    thickness = 0.5
+    material = Material(8.453e28, 63.54*amu, 29, 3.52*e, thickness=thickness*1e-6) #Copper
+    particles = [Particle(
+        4*amu, 2, energy*e,
+        [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
+        [0.99*material.energy_barrier_position, np.random.uniform(-thickness*1e-6, thickness*1e-6), 0.0],
+        incident=True, track_trajectories=True) for _ in range(N)]
+
+    plt.figure(1)
+    x, y = material.geometry.exterior.xy
+    x = np.array(x)
+    y = np.array(y)
+    plt.plot(x/angstrom, y/angstrom, color='dimgray', linewidth=3)
+    x, y = material.simulation_boundary.exterior.xy
+    x = np.array(x)
+    y = np.array(y)
+    plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
+    particles, material = bca(energy*e, 3.*e, N, angle, material, particles)
+    for particle_index, particle in enumerate(particles):
+        if particle_index > N: break
+        trajectory = np.array(particle.trajectory).transpose()
+        plt.plot(trajectory[0, :]/angstrom, trajectory[1, :]/angstrom, color=colors[particle.Z], linewidth=1)
+    plt.axis('square')
     plt.show()
+    plt.savefig('starchip.png')
+    print('Done!')
+    breakpoint()
 
 if __name__ == '__main__':
     main()
