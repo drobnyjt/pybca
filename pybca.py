@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from shapely.geometry import Point, Polygon, box
 from shapely.ops import nearest_points
+from star import ProtonSTARCalculator, ProtonMaterials, AlphaSTARCalculator, AlphaMaterials
 
 #constants
 e = 1.602e-19
@@ -86,7 +87,7 @@ class Particle:
         self.dir_cos[2] = cosz_new
 
 class Material:
-    def __init__(self, n, m, Z, Es, Eb=0.0, thickness=1*1e-6, depth=10*1e-6):
+    def __init__(self, n, m, Z, Es, Eb=0.0, thickness=2*1e-6, depth=100*1e-6, use_PSTAR=False, use_ASTAR=False, STAR_material=None):
         self.n = n
         self.m = m
         self.Z = Z
@@ -118,8 +119,16 @@ class Material:
         ))
 
         self.energy_barrier_geometry = self.geometry.buffer(self.energy_barrier_thickness)
-
         self.simulation_boundary = box(*self.energy_barrier_geometry.bounds)
+
+        self.use_PSTAR = use_PSTAR
+        self.use_ASTAR = use_ASTAR
+
+        self.STAR_material = STAR_material
+        if use_ASTAR:
+            self.AlphaSTARCaclulator = AlphaSTARCalculator(STAR_material)
+        if use_PSTAR:
+            self.ProtonSTARCalculator = ProtonSTARCalculator(STAR_material)
 
     def inside(self, pos):
         point = Point(pos[0], pos[1])
@@ -142,6 +151,42 @@ class Material:
     def number_density(self, pos):
         return self.n
 
+    def mass(self, pos):
+        return self.m
+
+    def electronic_stopping_factor(self, particle_1):
+        Za = particle_1.Z
+        Zb = self.Z_eff(particle_1.pos)
+        Ma = particle_1.m
+        E = particle_1.E
+        pos = particle_1.pos
+        Mb = self.mass(pos)
+
+        if not self.inside(particle_1.pos):
+            stopping_factor = 0.
+        else:
+            if particle_1.Z == 1 and self.use_PSTAR:
+                electronic_stopping_power = self.ProtonSTARCalculator.calculate_electronic_stopping_powers(E/e/1E6) #MeV cm2 / gram
+                stopping_factor = electronic_stopping_power*(self.number_density(pos)*Mb)*1E5*e #J/m
+            elif particle_1.Z == 2 and self.use_ASTAR:
+                electronic_stopping_power = self.ProtonSTARCalculator.calculate_electronic_stopping_powers(E/e/1E6) #MeV cm2 / gram
+                stopping_factor = electronic_stopping_power*(self.number_density(pos)*Mb)*1E5*e #J/m
+            elif E > 25E3*e:
+                v = np.sqrt(2.0*E/Ma) #[m/s]
+                print(v)
+                v = c*np.sqrt(E*2.*c^2*Ma + E)/(E - Ma*c^2)
+                print(v)
+                exit()
+                I = 10.*e*Zb #[J]
+                n = self.number_density(pos)*Zb #[electrons/m3]
+                stopping_factor = 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I) #[Joules/meter]
+            else:
+                #TRIDYN version of Lindhard-Scharff electronic stopping
+                Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
+                stopping_factor = self.number_density(pos)*Sel*angstrom**2*e
+
+        return stopping_factor
+
 def phi(xi):
     return np.sum(phi_coef*np.exp(phi_args*xi))
 
@@ -156,24 +201,6 @@ def doca_function(x0, beta, reduced_energy):
 
 def diff_doca_function(x0, beta, reduced_energy):
     return beta**2/x0**2 - dphi(x0)/reduced_energy + 1
-
-def bethe_stopping(particle_1, material):
-    E = particle_1.E
-    Za = particle_1.Z
-    Zb = material.Z_eff(particle_1.pos)
-    v = np.sqrt(2.0*E/Ma) #[m/s]
-    I = 10.0*e*Zb #[J]
-    n = material.number_density(particle_1.pos)*Zb #[electrons/m3]
-    stopping_factor = 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I) #[Joules/meter]
-    return stopping_factor
-
-def lindhard_scharff_stopping(particle_1, material):
-    E = particle_1.E
-    Za = particle_1.Z
-    Zb = material.Z_eff(particle_1.pos)
-    Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
-    stopping_factor = material.number_density(particle_1.pos)*Sel*angstrom**2*e
-    return stopping_factor
 
 def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-6, max_iter=100):
     #If recoil outside surface, skip collision
@@ -269,25 +296,9 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     Zb = material.Z_eff(particle_1.pos)
     E = particle_1.E
     a = screening_length(Za, Zb) #Z_eff?
-    #TRIDYN version of Lindhard-Scharff electronic stopping
-    v = np.sqrt(2.0*E/Ma) #[m/s]
-    I = 7*e*Zb #[J]
-    n = material.number_density(particle_1.pos)*Zb #[electrons/m3]
-    Sel = 1.212*(Za**(7./6.)*Zb)/((Za**(2./3.) + Zb**(2./3.))**(3./2.))*np.sqrt(E/Ma*amu/e)
 
-    if E > 25E3*e:
-        stopping_factor = 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I) #[Joules/meter]
-    else:
-        stopping_factor = material.number_density(particle_1.pos)*Sel*angstrom**2*e
-
-    #print(E/e, 4.0*np.pi*n*Za**2/(me*v**2)*(e**2/4.0/np.pi/eps0)**2*np.log(2.0*me*v**2/I)/(8960)/e/1e6*10, material.number_density(particle_1.pos)*Sel*angstrom**2*e/(8960)/e/1e6*10)
-
+    stopping_factor = material.electronic_stopping_factor(particle_1)
     Enl = free_flight_path*stopping_factor
-    print(stopping_factor/8960/e/1e6*10)
-    breakpoint()
-
-    #No electronic stopping out of material
-    if not material.inside(particle_1.pos): Enl = 0.
 
     #Energy calculation - make sure stopping doesn't reduce energy below zero
     particle_1.E = E - T - Enl
@@ -363,19 +374,20 @@ def surface_refraction(particle_1, material, model='planar', factor=1):
     else:
         particle_1.E += factor*material.Es
 
-def bca(E0, Ec, N, theta, material, particles, num_print=100):
+def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=False):
     #Surface refraction as first step - don't use for isotropic potential!
     for particle in particles:
         surface_refraction(particle, material, model='isotropic')
 
     #Empty arrays for plotting
-    estimated_num_recoils =np.int(np.ceil(N*E0/Ec))
+    estimated_num_recoils = np.int(np.ceil(N*E0/Ec))
 
+    print(f'E: {E0/e} eV')
     #Begin particle loop
     particle_index = 0
     while particle_index < len(particles):
-        print(particle_index)
-        if particle_index%(len(particles)/num_print) == 0: print(f'{np.round(particle_index / len(particles) * 100, 1)}%')
+
+        if particle_index%(len(particles)/num_print): print(f'particle {particle_index} of {len(particles)}')
 
         particle_1 = particles[particle_index]
         #Begin trajectory loop
@@ -400,35 +412,12 @@ def bca(E0, Ec, N, theta, material, particles, num_print=100):
             particle_1.add_trajectory()
 
             #Add recoil to particle array
-            if T > 1:
+            if T > Ec:
+                particle_2.track_trajectories = track_recoils
                 particles.append(particle_2)
 
         particle_index += 1
-
-    #print(len(particles))
-    #plt.figure(1)
-    #plt.scatter(trajectories[0, :trajectory_index]/angstrom, trajectories[1, :trajectory_index]/angstrom, color='black', s=1)
-    #plt.scatter(material.energy_barrier_position/angstrom, 0., color='red', marker='+')
-    #plt.scatter(x_final[x_final != 0]/angstrom, y_final[y_final != 0]/angstrom, color='red', marker='x')
-    #x, y = material.geometry.exterior.xy
-    #x = np.array(x)
-    #y = np.array(y)
-    #plt.plot(x/angstrom, y/angstrom, color='dimgray', linewidth=3)
-    #x, y = material.simulation_boundary.exterior.xy
-    #x = np.array(x)
-    #y = np.array(y)
-    #plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
-    #plt.axis('square')
-    #plt.axis('tight')
-
-    #plt.figure(2)
-    #plt.hist(x_final[x_final != 0.0]/angstrom, bins=20)
-    print(f'E: {E0/e}')
-    #print(f'R: {np.mean(x_final/angstrom)} sR: {np.std(x_final/angstrom)}')
-
-    #plt.figure(3)
-    #sputtered_cosx = [particle.cosx for particle in particles if (particle.left and not particle.incident)]
-    #plt.hist(sputtered_cosx, bins=20)
+        print(f'R: {particle_1.pos[0]*1e6} um')
 
     R = sum([1 if particle.left and particle.incident else 0 for particle in particles])
     S = sum([1 if particle.left and not particle.incident else 0 for particle in particles])
@@ -451,10 +440,11 @@ def main():
         1: 'red'
     }
 
-    thickness = 0.5
-    material = Material(8.453e28, 63.54*amu, 29, 3.52*e, thickness=thickness*1e-6) #Copper
+    thickness = 1.0
+    depth = 25
+    material = Material(8.453e28, 63.54*amu, 29, 3.52*e, depth=depth*1e-6, thickness=thickness*1e-6, use_PSTAR=True, STAR_material=ProtonMaterials.COPPER) #Copper
     particles = [Particle(
-        4*amu, 2, energy*e,
+        1*amu, 1, energy*e,
         [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
         [0.99*material.energy_barrier_position, np.random.uniform(-thickness*1e-6, thickness*1e-6), 0.0],
         incident=True, track_trajectories=True) for _ in range(N)]
@@ -468,9 +458,11 @@ def main():
     x = np.array(x)
     y = np.array(y)
     plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
-    particles, material = bca(energy*e, 3.*e, N, angle, material, particles)
+
+    particles, material = bca(energy*e, 3.*e, N, angle, material, particles, track_recoils=False)
+
     for particle_index, particle in enumerate(particles):
-        if particle_index > N: break
+        #if particle_index: break
         trajectory = np.array(particle.trajectory).transpose()
         plt.plot(trajectory[0, :]/angstrom, trajectory[1, :]/angstrom, color=colors[particle.Z], linewidth=1)
     plt.axis('square')
