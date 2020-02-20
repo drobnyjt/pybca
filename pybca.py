@@ -4,6 +4,8 @@ from mpl_toolkits.mplot3d import Axes3D
 from shapely.geometry import Point, Polygon, box
 from shapely.ops import nearest_points
 from star import ProtonSTARCalculator, ProtonMaterials, AlphaSTARCalculator, AlphaMaterials
+from numba import jit, float64, int32
+import time
 
 #constants
 e = 1.602e-19
@@ -13,10 +15,47 @@ eps0 = 8.85e-12
 a0 = 0.52918e-10
 K = 4.*np.pi*eps0
 me = 9.11e-31
+c = 3e8
 
 #screening
 phi_coef = np.array([0.191, 0.474, 0.335])
 phi_args = np.array([-0.279, -0.637, -1.919])
+
+#STAR materials
+PSTAR_materials = {
+    4: ProtonMaterials.BERYLLIUM,
+    13: ProtonMaterials.ALUMINUM,
+    14: ProtonMaterials.SILICON,
+    22: ProtonMaterials.TITANIUM,
+    26: ProtonMaterials.IRON,
+    29: ProtonMaterials.COPPER,
+    32: ProtonMaterials.GERMANIUM,
+    42: ProtonMaterials.MOLYBDENUM,
+    47: ProtonMaterials.SILVER,
+    50: ProtonMaterials.TIN,
+    74: ProtonMaterials.TUNGSTEN,
+    79: ProtonMaterials.GOLD,
+    82: ProtonMaterials.LEAD,
+    92: ProtonMaterials.URANIUM,
+    6: ProtonMaterials.GRAPHITE,
+}
+ASTAR_materials = {
+    4: AlphaMaterials.BERYLLIUM,
+    13: AlphaMaterials.ALUMINUM,
+    14: AlphaMaterials.SILICON,
+    22: AlphaMaterials.TITANIUM,
+    26: AlphaMaterials.IRON,
+    29: AlphaMaterials.COPPER,
+    32: AlphaMaterials.GERMANIUM,
+    42: AlphaMaterials.MOLYBDENUM,
+    47: AlphaMaterials.SILVER,
+    50: AlphaMaterials.TIN,
+    74: AlphaMaterials.TUNGSTEN,
+    79: AlphaMaterials.GOLD,
+    82: AlphaMaterials.LEAD,
+    92: AlphaMaterials.URANIUM,
+    6: AlphaMaterials.GRAPHITE,
+}
 
 class Particle:
     def __init__(self, m, Z, E, dir_cos, pos, incident=False, track_trajectories=False):
@@ -34,6 +73,7 @@ class Particle:
         self.first_step = self.incident
         self.trajectory = [[self.x, self.y, self.z]]
         self.track_trajectories = track_trajectories
+        self.origin = [self.x, self.y, self.z]
 
     def add_trajectory(self):
         if self.track_trajectories: self.trajectory.append([self.x, self.y, self.z])
@@ -187,22 +227,28 @@ class Material:
 
         return stopping_factor
 
+#@jit(float64(float64), nopython=True)
 def phi(xi):
     return np.sum(phi_coef*np.exp(phi_args*xi))
 
+#@jit(float64(float64), nopython=True)
 def dphi(xi):
     return np.sum(phi_args*phi_coef*np.exp(phi_args*xi))
 
+#@jit(float64(float64, float64), nopython=True)
 def screening_length(Za, Zb):
     return 0.8853*a0/(np.sqrt(Za) + np.sqrt(Zb))**(2./3.)
 
+#@jit(float64(float64, float64, float64), nopython=True)
 def doca_function(x0, beta, reduced_energy):
     return x0 - phi(x0)/reduced_energy - beta**2/x0
 
+#@jit(float64(float64, float64, float64), nopython=True)
 def diff_doca_function(x0, beta, reduced_energy):
-    return beta**2/x0**2 - dphi(x0)/reduced_energy + 1
+    return beta**2/x0**2 - dphi(x0)/reduced_energy + 1.
 
-def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-6, max_iter=100):
+#@jit
+def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-3, max_iter=100):
     #If recoil outside surface, skip collision
     if not material.inside(particle_2.pos):
         return 0., 0., 0., 0., 0.
@@ -247,6 +293,7 @@ def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-
 
     return theta, psi, T, t, x0
 
+#@jit
 def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t):
     #update position of moving particle
     mfp = material.mfp(particle_1.pos)
@@ -307,6 +354,7 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     particle_2.E = T - material.Eb
     if particle_2.E < 0: particle_2.E = 0.
 
+#@jit
 def pick_collision_partner(particle_1, material):
     #Pick mfp and impact parameter from distributions
     mfp = material.mfp(particle_1.pos)
@@ -328,6 +376,7 @@ def pick_collision_partner(particle_1, material):
 
     return impact_parameter, phi_azimuthal, Particle(material.m, material.Z, 0., [ca, cb, cg], [x_recoil, y_recoil, z_recoil])
 
+#@jit
 def surface_boundary_condition(particle_1, material, model='planar'):
     #Must overcome surface energy barrier to leave - planar model
     if model == 'planar':
@@ -356,6 +405,7 @@ def surface_boundary_condition(particle_1, material, model='planar'):
             surface_refraction(particle_1, material, model, factor=-1)
             return True
 
+#@jit
 def surface_refraction(particle_1, material, model='planar', factor=1):
     if model == 'planar':
         #See Eckstein Eq. 6.2.4
@@ -374,7 +424,7 @@ def surface_refraction(particle_1, material, model='planar', factor=1):
     else:
         particle_1.E += factor*material.Es
 
-def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=False):
+def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=False, track_recoil_trajectories=False):
     #Surface refraction as first step - don't use for isotropic potential!
     for particle in particles:
         surface_refraction(particle, material, model='isotropic')
@@ -391,6 +441,7 @@ def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=Fals
 
         particle_1 = particles[particle_index]
         #Begin trajectory loop
+        particle_start = time.time()
         while not (particle_1.stopped or particle_1.left):
             #Check particle stop conditions - reflection/sputtering or stopping
 
@@ -412,12 +463,14 @@ def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=Fals
             particle_1.add_trajectory()
 
             #Add recoil to particle array
-            if T > Ec:
-                particle_2.track_trajectories = track_recoils
+            if T > Ec and track_recoils:
+                particle_2.track_trajectories = track_recoil_trajectories
                 particles.append(particle_2)
 
         particle_index += 1
         print(f'R: {particle_1.pos[0]*1e6} um')
+        particle_time = time.time() - particle_start
+        print(f'Particle Time: {particle_time*1e3} ms')
 
     R = sum([1 if particle.left and particle.incident else 0 for particle in particles])
     S = sum([1 if particle.left and not particle.incident else 0 for particle in particles])
@@ -426,12 +479,12 @@ def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=Fals
     return particles, material
 
 def main():
-    np.random.seed(1)
+    np.random.seed(2)
 
     angle = 0.0001
-    energy = 1e6
+    energy = 1e5
 
-    N = 100
+    N = 10000
 
     colors = {
         29: 'black',
@@ -440,11 +493,18 @@ def main():
         1: 'red'
     }
 
-    thickness = 1.0
-    depth = 25
-    material = Material(8.453e28, 63.54*amu, 29, 3.52*e, depth=depth*1e-6, thickness=thickness*1e-6, use_PSTAR=True, STAR_material=ProtonMaterials.COPPER) #Copper
+    linewidths = {
+        1: 2,
+        2: 2,
+        29: 1,
+        74: 1,
+    }
+
+    thickness = 0.01
+    depth = 1.0
+    material = Material(8.453e28, 63.54*amu, 29, 3.52*e, depth=depth*1e-6, thickness=thickness*1e-6, use_PSTAR=True, use_ASTAR=True, STAR_material=ASTAR_materials[29]) #Copper
     particles = [Particle(
-        1*amu, 1, energy*e,
+        4*amu, 2, energy*e,
         [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
         [0.99*material.energy_barrier_position, np.random.uniform(-thickness*1e-6, thickness*1e-6), 0.0],
         incident=True, track_trajectories=True) for _ in range(N)]
@@ -459,17 +519,22 @@ def main():
     y = np.array(y)
     plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
 
-    particles, material = bca(energy*e, 3.*e, N, angle, material, particles, track_recoils=False)
+    particles, material = bca(energy*e, 3.*e, N, angle, material, particles, track_recoils=True, track_recoil_trajectories=True)
+
+    breakpoint()
 
     for particle_index, particle in enumerate(particles):
-        #if particle_index: break
+        #if particle_index < N:
         trajectory = np.array(particle.trajectory).transpose()
-        plt.plot(trajectory[0, :]/angstrom, trajectory[1, :]/angstrom, color=colors[particle.Z], linewidth=1)
+        plt.plot(trajectory[0, :]/angstrom, trajectory[1, :]/angstrom, color=colors[particle.Z], linewidth=linewidths[particle.Z])
+        #elif particle.left:
+            #plt.plot([particle.origin[0]/angstrom, particle.pos[0]/angstrom], [particle.origin[1]/angstrom, particle.pos[1]/angstrom], linewidth=1, color='black')
+
     plt.axis('square')
     plt.show()
     plt.savefig('starchip.png')
     print('Done!')
-    breakpoint()
+    #breakpoint()
 
 if __name__ == '__main__':
     main()
