@@ -16,6 +16,7 @@ a0 = 0.52918e-10
 K = 4.*np.pi*eps0
 me = 9.11e-31
 c = 3e8
+sqrtpi = np.sqrt(np.pi)
 
 #screening
 phi_coef = np.array([0.191, 0.474, 0.335])
@@ -159,7 +160,7 @@ class Material:
         ))
 
         self.energy_barrier_geometry = self.geometry.buffer(self.energy_barrier_thickness)
-        self.simulation_boundary = box(*self.energy_barrier_geometry.bounds)
+        self.simulation_boundary = box(*self.energy_barrier_geometry.bounds).buffer(self.energy_barrier_thickness)
 
         self.use_PSTAR = use_PSTAR
         self.use_ASTAR = use_ASTAR
@@ -205,10 +206,11 @@ class Material:
         if not self.inside(particle_1.pos):
             stopping_factor = 0.
         else:
-            if particle_1.Z == 1 and self.use_PSTAR:
+            if particle_1.Z == 1 and self.use_PSTAR and E > 1E3*e:
+                #STAR calculators only valid down to 1E3
                 electronic_stopping_power = self.ProtonSTARCalculator.calculate_electronic_stopping_powers(E/e/1E6) #MeV cm2 / gram
                 stopping_factor = electronic_stopping_power*(self.number_density(pos)*Mb)*1E5*e #J/m
-            elif particle_1.Z == 2 and self.use_ASTAR:
+            elif particle_1.Z == 2 and self.use_ASTAR and E > 1E3*e:
                 electronic_stopping_power = self.ProtonSTARCalculator.calculate_electronic_stopping_powers(E/e/1E6) #MeV cm2 / gram
                 stopping_factor = electronic_stopping_power*(self.number_density(pos)*Mb)*1E5*e #J/m
             elif E > 25E3*e:
@@ -247,8 +249,25 @@ def doca_function(x0, beta, reduced_energy):
 def diff_doca_function(x0, beta, reduced_energy):
     return beta**2/x0**2 - dphi(x0)/reduced_energy + 1.
 
+def rotate_around_axis(vector, axis, angle):
+    axis /= np.sqrt(axis.dot(axis))
+    ux, uy, uz = axis
+    cos = np.cos(angle)
+    sin = np.sin(angle)
+
+    R = np.array([
+        [cos + ux**2*(1. - cos), ux*uy*(1. - cos) - uz*sin, ux*uz*(1. - cos) + uy*sin],
+        [uy*ux*(1. - cos) + uz*sin, cos + uy**2*(1. - cos), uy*uz*(1. - cos) - ux*sin],
+        [uz*ux*(1. - cos) - uy*sin, uz*uy*(1. - cos) + ux*sin, cos + uz**2*(1. - cos)]
+        ]).transpose()
+
+    #breakpoint()
+
+    return R.dot(vector)
+
 #@jit
-def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-3, max_iter=100):
+#@profile
+def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-2, max_iter=100):
     #If recoil outside surface, skip collision
     if not material.inside(particle_2.pos):
         return 0., 0., 0., 0., 0.
@@ -291,9 +310,12 @@ def binary_collision(particle_1, particle_2, material, impact_parameter, tol=1e-
     psi = np.arctan2(np.sin(theta), (Ma/Mb) + np.cos(theta))
     T = 4.*(Ma*Mb)/(Ma + Mb)**2*E0*(np.sin(theta/2.))**2
 
+    #breakpoint()
+
     return theta, psi, T, t, x0
 
 #@jit
+#@profile
 def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, psi, T, t):
     #update position of moving particle
     mfp = material.mfp(particle_1.pos)
@@ -313,7 +335,8 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
 
     #update angular coordinates of incident particle
     ca, cb, cg = particle_1.dir_cos
-    sa = np.sin(np.arccos(ca))
+    #sa = np.sin(np.arccos(ca))
+    sa = np.sqrt(1. - ca**2)
     cphi = np.cos(phi_azimuthal)
     sphi = np.sin(phi_azimuthal)
     cpsi = np.cos(psi)
@@ -322,7 +345,7 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     cb_new = cpsi*cb - spsi/sa*(cphi*ca*cb - sphi*cg)
     cg_new = cpsi*cg - spsi/sa*(cphi*ca*cg + sphi*cb)
     dir_cos_new = [ca_new, cb_new, cg_new]
-    dir_cos_new /= np.linalg.norm(dir_cos_new)
+    dir_cos_new /= np.sqrt(ca_new**2 + cb_new**2 + cg_new**2)
     particle_1.dir_cos[:] = dir_cos_new
 
     #update angular coordinates of secondary particle
@@ -333,7 +356,7 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     cb_new = cpsi_b*cb - spsi_b/sa*(cphi*ca*cb - sphi*cg)
     cg_new = cpsi_b*cg - spsi_b/sa*(cphi*ca*cg + sphi*cb)
     dir_cos_new = [ca_new, cb_new, cg_new]
-    dir_cos_new /= np.linalg.norm(dir_cos_new)
+    dir_cos_new /= np.sqrt(ca_new**2 + cb_new**2 + cg_new**2)
     particle_2.dir_cos[:] = dir_cos_new
 
     #update energy coordinates
@@ -355,10 +378,11 @@ def update_coordinates(particle_1, particle_2, material, phi_azimuthal, theta, p
     if particle_2.E < 0: particle_2.E = 0.
 
 #@jit
+#@profile
 def pick_collision_partner(particle_1, material):
     #Pick mfp and impact parameter from distributions
     mfp = material.mfp(particle_1.pos)
-    pmax = mfp/np.sqrt(np.pi)
+    pmax = mfp/sqrtpi
     impact_parameter = pmax * np.sqrt(np.random.uniform(0., 1.))
     phi_azimuthal = np.random.uniform(0.0, 2.0*np.pi)
 
@@ -366,7 +390,8 @@ def pick_collision_partner(particle_1, material):
     ca = particle_1.cosx
     cb = particle_1.cosy
     cg = particle_1.cosz
-    sa = np.sin(np.arccos(ca))
+    #sa = np.sin(np.arccos(ca))
+    sa = np.sqrt(1. - ca**2)
     cphi = np.cos(phi_azimuthal)
 
     #Recoil position displaced by impact parameter 1 mfp ahead of particle
@@ -377,6 +402,7 @@ def pick_collision_partner(particle_1, material):
     return impact_parameter, phi_azimuthal, Particle(material.m, material.Z, 0., [ca, cb, cg], [x_recoil, y_recoil, z_recoil])
 
 #@jit
+#@profile
 def surface_boundary_condition(particle_1, material, model='planar'):
     #Must overcome surface energy barrier to leave - planar model
     if model == 'planar':
@@ -386,26 +412,26 @@ def surface_boundary_condition(particle_1, material, model='planar'):
 
     if (not material.inside_energy_barrier(particle_1.pos)) and (material.inside_energy_barrier(particle_1.pos_old)):
         if leaving_energy < material.Es:
+
             point = Point(particle_1.x, particle_1.y)
-            nearest, _ = nearest_points(material.energy_barrier_geometry, point)
-            dx = nearest.x - point.x
-            dy = nearest.y - point.y
+            nearest_geometry, _ = nearest_points(material.geometry, point)
 
-            particle_1.cosx *= -1 #Reflect back onto surface if not enough energy to leave
-            particle_1.cosy *= -1 #This is a 180deg rotation - not correct!
+            dx = nearest_geometry.x - point.x
+            dy = nearest_geometry.y - point.y
 
-            particle_1.cosx = 2.*(particle_1.cosx*dx + particle_1.cosy*dy)/(dx**2 + dy**2)*dx - particle_1.cosx
-            particle_1.cosy = 2.*(particle_1.cosx*dx + particle_1.cosy*dy)/(dx**2 + dy**2)*dy - particle_1.cosy
+            axis = np.array([dx, dy, 0.])
 
-            particle_1.x = nearest.x
-            particle_1.y = nearest.y
+            particle_1.cosx *= -1
+            particle_1.cosy *= -1
 
+            particle_1.dir_cos = rotate_around_axis(particle_1.dir_cos, axis, np.pi)
             return False
         else:
             surface_refraction(particle_1, material, model, factor=-1)
             return True
 
 #@jit
+#@profile
 def surface_refraction(particle_1, material, model='planar', factor=1):
     if model == 'planar':
         #See Eckstein Eq. 6.2.4
@@ -414,30 +440,35 @@ def surface_refraction(particle_1, material, model='planar', factor=1):
         E0 = particle_1.E
         cosx0 = particle_1.cosx
         sign = np.sign(particle_1.cosx)
-        sinx0 = np.sin(np.arccos(cosx0))
+        #sinx0 = np.sin(np.arccos(cosx0))
+        sinx0 = np.sqrt(1. - cosx0**2)
 
         particle_1.cosx = np.sqrt((E0*cosx0**2 + sign*Es)/(E0 + sign*Es))
-        sinx = np.sin(np.arccos(particle_1.cosx))
+        #sinx = np.sin(np.arccos(particle_1.cosx))
+        sinx = np.sqrt(1 - particle_1.cosx**2)
         particle_1.cosy *= sinx/sinx0
         particle_1.cosz *= sinx/sinx0
         particle_1.E += sign*material.Es
     else:
         particle_1.E += factor*material.Es
 
-def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=False, track_recoil_trajectories=False):
+#@profile
+def bca(Ec, material, particles, num_print=100, track_recoils=False, track_recoil_trajectories=False):
     #Surface refraction as first step - don't use for isotropic potential!
-    for particle in particles:
+    N = len(particles)
+
+    energies = np.zeros(N)
+    for index, particle in enumerate(particles):
         surface_refraction(particle, material, model='isotropic')
+        energies[index] = particle.E
+    total_particle_energy = sum(energies)
 
     #Empty arrays for plotting
-    estimated_num_recoils = np.int(np.ceil(N*E0/Ec))
+    estimated_num_recoils = np.int(np.ceil(total_particle_energy/Ec))
 
-    print(f'E: {E0/e} eV')
     #Begin particle loop
     particle_index = 0
     while particle_index < len(particles):
-
-        if particle_index%(len(particles)/num_print): print(f'particle {particle_index} of {len(particles)}')
 
         particle_1 = particles[particle_index]
         #Begin trajectory loop
@@ -467,10 +498,13 @@ def bca(E0, Ec, N, theta, material, particles, num_print=100, track_recoils=Fals
                 particle_2.track_trajectories = track_recoil_trajectories
                 particles.append(particle_2)
 
+        #if particle_index%(estimated_num_recoils//num_print + 1) == 0 or particle_index == 0:
+        #    print(f'particle {particle_index} of {len(particles)}')
+        #    print(f'R: {particle_1.pos[0]*1e6} um')
+        #    particle_time = time.time() - particle_start
+        #    print(f'Particle Time: {particle_time*1e3} ms')
         particle_index += 1
-        print(f'R: {particle_1.pos[0]*1e6} um')
-        particle_time = time.time() - particle_start
-        print(f'Particle Time: {particle_time*1e3} ms')
+
 
     R = sum([1 if particle.left and particle.incident else 0 for particle in particles])
     S = sum([1 if particle.left and not particle.incident else 0 for particle in particles])
@@ -482,9 +516,9 @@ def main():
     np.random.seed(2)
 
     angle = 0.0001
-    energy = 1e5
+    energy = 1e4
 
-    N = 10000
+    N = 100
 
     colors = {
         29: 'black',
@@ -500,8 +534,8 @@ def main():
         74: 1,
     }
 
-    thickness = 0.01
-    depth = 1.0
+    thickness = 0.1
+    depth = 0.1
     material = Material(8.453e28, 63.54*amu, 29, 3.52*e, depth=depth*1e-6, thickness=thickness*1e-6, use_PSTAR=True, use_ASTAR=True, STAR_material=ASTAR_materials[29]) #Copper
     particles = [Particle(
         4*amu, 2, energy*e,
@@ -514,19 +548,26 @@ def main():
     x = np.array(x)
     y = np.array(y)
     plt.plot(x/angstrom, y/angstrom, color='dimgray', linewidth=3)
+
     x, y = material.simulation_boundary.exterior.xy
     x = np.array(x)
     y = np.array(y)
     plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
 
-    particles, material = bca(energy*e, 3.*e, N, angle, material, particles, track_recoils=True, track_recoil_trajectories=True)
+    x, y = material.energy_barrier_geometry.exterior.xy
+    x = np.array(x)
+    y = np.array(y)
+    plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
 
-    breakpoint()
+    particles, material = bca(3.*e, material, particles, track_recoils=True, track_recoil_trajectories=True)
+
+    #breakpoint()
 
     for particle_index, particle in enumerate(particles):
         #if particle_index < N:
         trajectory = np.array(particle.trajectory).transpose()
         plt.plot(trajectory[0, :]/angstrom, trajectory[1, :]/angstrom, color=colors[particle.Z], linewidth=linewidths[particle.Z])
+        #plt.scatter(trajectory[0, :]/angstrom, trajectory[1, :]/angstrom, color=colors[particle.Z], s=linewidths[particle.Z], marker='o')
         #elif particle.left:
             #plt.plot([particle.origin[0]/angstrom, particle.pos[0]/angstrom], [particle.origin[1]/angstrom, particle.pos[1]/angstrom], linewidth=1, color='black')
 
