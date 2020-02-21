@@ -498,8 +498,7 @@ def bca(Ec, material, particles, num_print=100, track_recoils=False, track_recoi
                 particle_2.track_trajectories = track_recoil_trajectories
                 particles.append(particle_2)
 
-        #if particle_index%(estimated_num_recoils//num_print + 1) == 0 or particle_index == 0:
-        #    print(f'particle {particle_index} of {len(particles)}')
+        print(f'particle {particle_index} of {len(particles)}')
         #    print(f'R: {particle_1.pos[0]*1e6} um')
         #    particle_time = time.time() - particle_start
         #    print(f'Particle Time: {particle_time*1e3} ms')
@@ -516,9 +515,9 @@ def main():
     np.random.seed(2)
 
     angle = 0.0001
-    energy = 1e4
+    energy = 1e6
 
-    N = 100
+    N = 10000
 
     colors = {
         29: 'black',
@@ -534,14 +533,14 @@ def main():
         74: 1,
     }
 
-    thickness = 0.1
-    depth = 0.1
+    thickness = 10
+    depth = 10
     material = Material(8.453e28, 63.54*amu, 29, 3.52*e, depth=depth*1e-6, thickness=thickness*1e-6, use_PSTAR=True, use_ASTAR=True, STAR_material=ASTAR_materials[29]) #Copper
     particles = [Particle(
         4*amu, 2, energy*e,
         [np.cos(angle*np.pi/180.), np.sin(angle*np.pi/180.), 0.0],
         [0.99*material.energy_barrier_position, np.random.uniform(-thickness*1e-6, thickness*1e-6), 0.0],
-        incident=True, track_trajectories=True) for _ in range(N)]
+        incident=True, track_trajectories=False) for _ in range(N)]
 
     plt.figure(1)
     x, y = material.geometry.exterior.xy
@@ -559,9 +558,9 @@ def main():
     y = np.array(y)
     plt.plot(x/angstrom, y/angstrom, '--', color='dimgray')
 
-    particles, material = bca(3.*e, material, particles, track_recoils=True, track_recoil_trajectories=True)
+    particles, material = bca(3.*e, material, particles, track_recoils=True, track_recoil_trajectories=False)
 
-    #breakpoint()
+    breakpoint()
 
     for particle_index, particle in enumerate(particles):
         #if particle_index < N:
